@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ember Catch — a tiny game from one prompt</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  html, body { margin: 0; padding: 0; background: #0d0a1a; height: 100%; overflow: hidden; }
+  #game { display: block; margin: 0 auto; background: #14102b; }
+  #hint {
+    position: fixed; left: 0; right: 0; bottom: 10px; text-align: center;
+    color: #cfc4ff; font: 15px/1.4 system-ui, sans-serif; opacity: .8;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="game" width="1280" height="720"></canvas>
+<div id="hint">Move with &larr; &rarr; or your mouse &mdash; catch the embers, don't let them hit the ground!</div>
+<script>
+'use strict';
+// Ember Catch: catch falling embers with a basket.
+// One prompt: "a tiny browser game where you catch falling embers with a basket".
+// Controls: left/right arrows or mouse. 60 seconds, 3 lives, speed rises over time.
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+const GROUND = H - 46;
+
+const basket = { x: W / 2, w: 150, h: 34, speed: 11 };
+let embers = [];
+let score = 0, lives = 3, caught = 0, missed = 0;
+let timeLeft = 60, lastTick = performance.now(), over = false, started = false;
+let keys = {};
+let spawnIn = 0;
+
+// ?auto=1 lets the basket steer itself (demo/autopilot mode for the video).
+const AUTO = new URLSearchParams(location.search).has('auto');
+
+function rand(a, b) { return a + Math.random() * (b - a); }
+
+function spawnEmber() {
+  const fast = 1 + (60 - timeLeft) / 45; // speeds up as the round goes on
+  embers.push({
+    x: rand(30, W - 30), y: -20, r: rand(9, 15),
+    vy: rand(2.6, 4.4) * fast, vx: rand(-0.7, 0.7),
+    hue: rand(14, 42), wobble: rand(0, Math.PI * 2)
+  });
+}
+
+function drawBackground() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#1b1440'); g.addColorStop(0.7, '#14102b'); g.addColorStop(1, '#0d0a1a');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // stars
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  for (let i = 0; i < 70; i++) {
+    const sx = (i * 173) % W, sy = (i * 97) % 320;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+  // moon
+  ctx.fillStyle = '#f5eeda';
+  ctx.beginPath(); ctx.arc(1120, 90, 44, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#e2d9bd';
+  ctx.beginPath(); ctx.arc(1106, 80, 9, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(1134, 104, 6, 0, Math.PI * 2); ctx.fill();
+  // ground
+  ctx.fillStyle = '#241a4d'; ctx.fillRect(0, GROUND, W, H - GROUND);
+  ctx.fillStyle = '#372a6b'; ctx.fillRect(0, GROUND, W, 4);
+}
+
+function drawBasket() {
+  const y = GROUND - basket.h;
+  ctx.fillStyle = '#8a5a2b';
+  ctx.beginPath();
+  ctx.moveTo(basket.x - basket.w / 2, y);
+  ctx.lineTo(basket.x + basket.w / 2, y);
+  ctx.lineTo(basket.x + basket.w / 2 - 14, y + basket.h);
+  ctx.lineTo(basket.x - basket.w / 2 + 14, y + basket.h);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#b07a3e';
+  ctx.fillRect(basket.x - basket.w / 2, y, basket.w, 7);
+  ctx.fillStyle = '#e8b25c';
+  ctx.fillRect(basket.x - basket.w / 2 + 8, y + 12, basket.w - 16, 4);
+}
+
+function drawEmber(e) {
+  const glow = ctx.createRadialGradient(e.x, e.y, 2, e.x, e.y, e.r * 3);
+  glow.addColorStop(0, 'rgba(255,190,80,0.9)');
+  glow.addColorStop(0.4, 'rgba(255,120,30,0.45)');
+  glow.addColorStop(1, 'rgba(255,80,0,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(e.x, e.y, e.r * 3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = `hsl(${e.hue}, 100%, 62%)`;
+  ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#fff3c4';
+  ctx.beginPath(); ctx.arc(e.x - e.r * 0.25, e.y - e.r * 0.25, e.r * 0.4, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawHud() {
+  ctx.fillStyle = 'rgba(10,6,26,0.55)';
+  ctx.fillRect(0, 0, W, 58);
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 30px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('SCORE ' + score, 24, 40);
+  ctx.fillText('TIME ' + Math.ceil(timeLeft) + 's', 300, 40);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = lives > 1 ? '#ffb84d' : '#ff5d5d';
+  ctx.fillText('LIVES ' + '●'.repeat(lives) + '○'.repeat(Math.max(0, 3 - lives)), W - 24, 40);
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#cfc4ff';
+  ctx.font = '22px system-ui, sans-serif';
+  ctx.fillText('EMBER CATCH', W / 2, 38);
+}
+
+function drawCenter(text, sub) {
+  ctx.fillStyle = 'rgba(10,6,26,0.72)';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#ffd27a';
+  ctx.font = 'bold 64px system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, W / 2, H / 2 - 10);
+  ctx.fillStyle = '#fff';
+  ctx.font = '28px system-ui, sans-serif';
+  ctx.fillText(sub, W / 2, H / 2 + 48);
+}
+
+function step(now) {
+  const dt = Math.min(0.05, (now - lastTick) / 1000);
+  lastTick = now;
+
+  if (!over) {
+    timeLeft -= dt;
+    if (timeLeft <= 0) { timeLeft = 0; over = true; }
+
+    // steering: keys, mouse, or autopilot
+    let target = null;
+    if (keys.ArrowLeft) basket.x -= basket.speed;
+    if (keys.ArrowRight) basket.x += basket.speed;
+    if (AUTO && embers.length) {
+      let best = embers[0];
+      for (const e of embers) if (e.y > best.y) best = e;
+      target = best.x;
+    } else if (mouseX !== null) {
+      target = mouseX;
+    }
+    if (target !== null) {
+      const diff = target - basket.x;
+      basket.x += Math.max(-basket.speed, Math.min(basket.speed, diff));
+    }
+    basket.x = Math.max(basket.w / 2, Math.min(W - basket.w / 2, basket.x));
+
+    spawnIn -= dt;
+    if (spawnIn <= 0) { spawnEmber(); spawnIn = rand(0.45, 0.95); }
+
+    for (let i = embers.length - 1; i >= 0; i--) {
+      const e = embers[i];
+      e.wobble += dt * 3;
+      e.y += e.vy; e.x += e.vx + Math.sin(e.wobble) * 0.5;
+      const by = GROUND - basket.h;
+      if (e.y + e.r >= by && e.y < GROUND && Math.abs(e.x - basket.x) < basket.w / 2) {
+        embers.splice(i, 1); score += 10; caught++;
+      } else if (e.y - e.r > GROUND) {
+        embers.splice(i, 1); missed++; lives--;
+        if (lives <= 0) over = true;
+      }
+    }
+  }
+
+  drawBackground();
+  for (const e of embers) drawEmber(e);
+  drawBasket();
+  drawHud();
+  if (!started) drawCenter('EMBER CATCH', 'Catch the falling embers — press any key to start');
+  else if (over) drawCenter(
+    lives > 0 ? 'TIME UP!' : 'OUT OF LIVES!',
+    'Score ' + score + '  ·  caught ' + caught + '  ·  missed ' + missed + ' — refresh to play again'
+  );
+  requestAnimationFrame(step);
+}
+
+let mouseX = null;
+addEventListener('keydown', (ev) => {
+  keys[ev.key] = true;
+  if (!started) { started = true; lastTick = performance.now(); }
+  if (['ArrowLeft', 'ArrowRight'].includes(ev.key)) ev.preventDefault();
+});
+addEventListener('keyup', (ev) => { keys[ev.key] = false; });
+addEventListener('mousemove', (ev) => {
+  const rect = canvas.getBoundingClientRect();
+  mouseX = (ev.clientX - rect.left) * (W / rect.width);
+  if (!started) { started = true; lastTick = performance.now(); }
+});
+addEventListener('mousedown', () => { if (!started) { started = true; lastTick = performance.now(); } });
+
+// Autopilot starts the round by itself so a recording can just watch it play.
+if (AUTO) { started = true; }
+requestAnimationFrame(step);
+</script>
+</body>
+</html>
